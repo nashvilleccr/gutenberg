@@ -9,7 +9,8 @@ const { ValidationError } = require( './validate-config' );
 /**
  * External dependencies
  */
-const fs = require( 'fs' );
+const fs = require( 'fs/promises' );
+const path = require( 'path' );
 const devcert = require( 'devcert' );
 
 /**
@@ -187,51 +188,54 @@ function appendPortToWPConfigs( config ) {
 }
 
 async function enableHttps( config ) {
-	if ( config.https === true ) {
-		const workDirectoryPath = config.coreSource.path.replace(
-			/\/WordPress$/,
-			''
+	// only run if 'https' set to 'true'
+	if ( ! config.https === true ) {
+		return config;
+	}
+
+	// throw error if only one of 'sslCertPath' and 'sslKeyPath' is set
+	if ( typeof config.sslCertPath !== typeof config.sslKeyPath ) {
+		throw new ValidationError(
+			'Invalid config: sslCertPath and sslKeyPath must both be set.'
 		);
-		const httpsUrl = ( url ) => url.replace( /^http:\/\//i, 'https://' );
-		const domainName = new URL(config.config.WP_HOME).hostname;
+	}
 
-		// change the siteurl and home to https
-		config.config.WP_SITEURL = httpsUrl( config.config.WP_SITEURL );
-		config.config.WP_HOME = httpsUrl( config.config.WP_HOME );
+	const httpsUrl = ( url ) => url.replace( /^http:\/\//i, 'https://' );
+	const domainName = new URL( config.config.WP_HOME ).hostname;
 
-		// check if certificate and key are set, if not we will create them
-		if (
-			config.sslCertPath === undefined &&
-			config.sslKeyPath === undefined
-		) {
-			const certsDir = workDirectoryPath + '/certs';
-			const certFile = `${ certsDir }/${ domainName }.crt`;
-			const keyFile = `${ certsDir }/${ domainName }.key`;
-			await devcert
-				.certificateFor( domainName )
-				.then( ( { key, cert } ) => {
-					if ( ! fs.existsSync( certsDir ) ) {
-						fs.mkdirSync( certsDir );
-					}
+	// change the siteurl and home to https
+	config.config.WP_SITEURL = httpsUrl( config.config.WP_SITEURL );
+	config.config.WP_HOME = httpsUrl( config.config.WP_HOME );
 
-					if (
-						fs.existsSync( certFile ) &&
-						fs.existsSync( keyFile )
-					) {
-						return;
-					}
+	// set default paths if both are unset
+	if (
+		config.sslCertPath === undefined &&
+		config.sslKeyPath === undefined
+	) {
+		const defaultCertsDir = `${ path.dirname( config.coreSource.path ) }/certs`;
+		config.sslCertPath = `${ defaultCertsDir }/${ domainName }.crt`;
+		config.sslKeyPath = `${ defaultCertsDir }/${ domainName }.key`;
+	}
 
-					fs.writeFileSync( certFile, cert );
-					fs.writeFileSync( keyFile, key );
-				} );
+	// create certificates if they don't exist
+	if (
+		! await Promise.all( [
+			fs.access( config.sslCertPath, fs.constants.R_OK ),
+			fs.access( config.sslKeyPath, fs.constants.R_OK ),
+		] ).catch( () => false )
+	) {
+		const { key, cert } = await devcert.certificateFor( domainName );
 
-			config.sslCertPath = certFile;
-			config.sslKeyPath = keyFile;
-		} else {
-			throw new ValidationError(
-				'Invalid config: sslCertPath and sslKeyPath must both be set.'
-			);
-		}
+		const writeFile = async ( file, contents ) => {
+			console.log( `Creating: ${ file }` );
+			await fs.mkdir( path.dirname( file ), { recursive: true } );
+			await fs.writeFile( file, contents );
+		};
+
+		await Promise.all( [
+			writeFile( config.sslCertPath, cert ),
+			writeFile( config.sslKeyPath, key ),
+		] );
 	}
 
 	return config;
